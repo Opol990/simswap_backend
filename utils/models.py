@@ -9,45 +9,54 @@ class UserModel(BaseModel):
     username: str = Field(..., example="user123")
     password: str = Field(..., example="securepassword")
     email: str = Field(..., example="user@example.com")
-    first_name:str 
-    last_name:str
+    apellido1:str 
+    apellido2:Optional[str]
+    
+    
+    
+    # class Config:
+    #     orm_mode = True
+    #     from_attributes=True
 
 class LoginRequest(BaseModel):
     email:str
     password:str
 
 class RegisterUserRequest(BaseModel):
-    nombre_usuario: str = Field(..., example="nuevo_usuario")
+    username: str = Field(..., example="nuevo_usuario")
+    nombre: str = Field(..., example="nuevo_usuario")
+    apellido1: str = Field(..., example="nuevo_usuario")
+    apellido2: Optional[str] = Field(..., example="nuevo_usuario")
     email: EmailStr = Field(..., example="nuevo@usuario.com")
     contraseña: str = Field(..., example="contraseñaSegura123")
-    fecha_registro: Optional[datetime] = Field(default_factory=datetime.utcnow, example="2023-01-01T00:00:00")
     ubicacion: Optional[str] = Field(None, description="Ciudad, País")
-    intereses: Optional[str] = Field(None, description="Simulacion, F1")
-    historial: Optional[str] = Field(None, description="Historial de actividades")
-
+    
 class UpdateUserRequest(BaseModel):
-    nombre_usuario: str = Field(..., example="nuevo_usuario")
+    username: str = Field(..., example="nuevo_usuario")
+    nombre: str = Field(..., example="nuevo_usuario")
     email: EmailStr = Field(..., example="nuevo@usuario.com")
+    apellido1: str = Field(..., example="nuevo_usuario")
+    apellido2: Optional[str] = Field(..., example="nuevo_usuario")
     fecha_registro: Optional[datetime] = Field(default_factory=datetime.utcnow, example="2023-01-01T00:00:00")
     ubicacion: Optional[str] = Field(None, description="Ciudad, País")
-    intereses: Optional[str] = Field(None, description="Simulacion, F1")
 
 class FindUserRequest(BaseModel):
     user_id: Optional[int] = Field(None, description="ID del usuario")
     token: Optional[str] = Field(None, description="Token del usuario")    
 
 class ProductModel(BaseModel):
-    nombre: str = Field(..., example="Laptop HP Probook 450 G1")
+    nombre_producto: str = Field(..., example="Laptop HP Probook 450 G1")
+    marca: str = Field(..., example="Laptop HP Probook 450 G1")
+    modelo: str = Field(..., example="Laptop HP Probook 450 G1")
+    precio: float 
     descripcion: Optional[str] = Field(None, example="Una laptop robusta y confiable para profesionales.")
-    visitas: Optional[int] = Field(default=0, example=0)
     localizacion: str = Field(..., example="Madrid, España")
-    categoria_id: str = Field(..., example="Volante, Pedalera")
-
-    class Config:
-        orm_mode = True
+    categoria: str = Field(..., example="Volante, Pedalera")
+    # class Config:
+    #     orm_mode = True
 
 class FindProductIDRequest(BaseModel):
-    user_id: Optional[int] = Field(None, description="ID del producto")
+    product_id: Optional[int] = Field(None, description="ID del producto")
 
 
 class ProductQuery(BaseModel):
@@ -56,13 +65,34 @@ class ProductQuery(BaseModel):
     localizacion: Optional[str] = Field(None, example="Madrid")
     categoria: Optional[str] = Field(None, example="Electrónica")
 
-    
-class AdvertisementModel(BaseModel):
-    vendedor_id: int = Field(..., example=1)
-    producto_id: int = Field(..., example=1)
-    precio: float = Field(..., example=299.99)
-    fecha_publicacion: datetime = Field(default_factory=datetime.utcnow)
-    estado: str = Field(default='disponible', example="disponible")
 
-    class Config:
-        orm_mode = True
+class Message(BaseModel):
+    producto_id: int
+    id_usuario_envia: int
+    id_usuario_recibe: int
+    contenido: str
+    fecha_envio: datetime
+    leido: Optional[bool] = False
+
+class Review(BaseModel):
+    valoracion_id: Optional[int]
+    de_usuario_id: int
+    para_usuario_id: int
+    puntuacion: int
+    comentario: Optional[str]
+    fecha_valoracion: datetime
+
+class TransactionModel(BaseModel):
+    transaccion_id: Optional[int]
+    comprador_id: int
+    vendedor_id: int
+    producto_id: int
+    fecha_transaccion: datetime
+    monto: float
+    stripe_payment_id: str
+
+class Shipment(BaseModel):
+    envio_id: Optional[int]
+    transaccion_id: int
+    estado_envio: str
+    fecha_envio: Optional[datetime]

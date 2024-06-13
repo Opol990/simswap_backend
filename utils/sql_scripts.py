@@ -1,17 +1,19 @@
 from fastapi import HTTPException
 from utils.sql_models import *
 from utils.sql_connection import SessionLocal, engine
-from utils.models import RegisterUserRequest, UpdateUserRequest, ProductModel, ProductQuery, AdvertisementModel
+from utils.models import RegisterUserRequest, UpdateUserRequest, ProductModel, ProductQuery, UserModel
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 import re
 from sqlalchemy.orm import Session
 from passlib.context import CryptContext
-from utils.tools import create_access_token
+from utils.tools import create_access_token, verify_password
 from jose import JWTError, jwt 
 from fastapi import FastAPI, Path,HTTPException, Depends,Request,status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import or_, and_
+from datetime import datetime
+from sqlalchemy.exc import SQLAlchemyError
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -29,18 +31,13 @@ def get_db():
 
 #----------------------------USER-----------------------------------
 
-def user_login(email:str, pwd:str, db:Session):
+def user_login(email: str, pwd: str, db: Session):
     user = db.query(Usuario).filter(Usuario.email == email).first()
-    if not user:
-        raise HTTPException(status_code=400, detail="Incorrect username or password")
+    if user is None or not verify_password(pwd, user.hash_contraseña):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
     
-    if not pwd_context.verify(pwd, user.hash_contraseña):
-        raise HTTPException(status_code=400, detail="Incorrect username or password")
-    
-    user_dict = {"email": user.email, "usuario_id": user.usuario_id}
-    access_token = create_access_token(data=user_dict)
-    return {"api_token": access_token}
-
+    access_token = create_access_token(data={"email": user.email})
+    return access_token, user
 def register_new_user(user_request: RegisterUserRequest, db: Session):
    # Verificar si el usuario ya existe
    existing_user = db.query(Usuario).filter(Usuario.email == user_request.email).first()
@@ -50,14 +47,15 @@ def register_new_user(user_request: RegisterUserRequest, db: Session):
    hashed_password = pwd_context.hash(user_request.contraseña)
    # Crear un nuevo usuario
    new_user = Usuario(
-       nombre_usuario=user_request.nombre_usuario,
+       username = user_request.username,
+       nombre=user_request.nombre,
+       apellido1=user_request.apellido1,
+       apellido2=user_request.apellido2,
        email=user_request.email,
        hash_contraseña=hashed_password,
-       fecha_registro=user_request.fecha_registro,
-       ubicacion=user_request.ubicacion,
-       intereses=user_request.intereses,
-       historial=user_request.historial
-   )
+       fecha_registro = datetime.now(),
+       ubicacion = user_request.ubicacion
+    )
    db.add(new_user)
    db.commit()
    db.refresh(new_user)
@@ -91,19 +89,32 @@ def delete_user(user_id: int, db: Session):
 
 #----------------------------PRODUCT-----------------------------------
 
-def create_product(product: ProductModel, db: Session):
-    categoria_id = buscar_id_categoria(product.categoria, db)
-    new_product = Producto(
-        nombre=product.nombre,
-        descripcion=product.descripcion,
-        visitas=product.visitas,
-        localizacion=product.localizacion,
-        categoria_id=categoria_id
-    )
-    db.add(new_product)
-    db.commit()
-    db.refresh(new_product)
-    return new_product
+def create_product(product: ProductModel, user:Usuario, db: Session):
+    try:
+        # Buscar el categoria_id correspondiente al nombre de la categoría
+        category = db.query(Categoria).filter(Categoria.nombre == product.categoria).first()
+        if not category:
+            raise HTTPException(status_code=400, detail="Categoría no encontrada")
+        
+        db_product = Producto(
+            nombre_producto=product.nombre_producto,
+            marca=product.marca,
+            modelo=product.modelo,
+            descripcion=product.descripcion,
+            precio=product.precio,
+            disponibilidad="disponible",
+            localizacion=product.localizacion,
+            categoria_id=category.categoria_id,
+            vendedor_id=user.usuario_id,
+            fecha_publicacion=datetime.utcnow(),
+        )
+        db.add(db_product)
+        db.commit()
+        db.refresh(db_product)
+        return db_product
+    except SQLAlchemyError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
 
 def search_products(query: ProductQuery, db: Session ):
     query_filters = []
@@ -131,6 +142,7 @@ def buscar_id_categoria(nombre_categoria: str, db: Session) -> int:
     return categoria.categoria_id
 
 def find_all_products(db:Session):
+    print("llega")
     products = db.query(Producto).all()
     return products
 
@@ -172,56 +184,6 @@ def delete_product_by_id(product_id: int, db: Session):
     db.commit()
     return {"message": "Producto Borrado"}
 
-
-#----------------------------ANUNCIOS-----------------------------------
-
-
-def add_anuncio(ad: AdvertisementModel, db: Session = Depends(get_db)):
-    new_ad = Anuncio(
-        vendedor_id=ad.vendedor_id,
-        producto_id=ad.producto_id,
-        precio=ad.precio,
-        fecha_publicacion=ad.fecha_publicacion,
-        estado=ad.estado
-    )
-    db.add(new_ad)
-    db.commit()
-    db.refresh(new_ad)
-    return new_ad
-
-def get_all_anuncios(db: Session):
-    ads = db.query(Anuncio).all()
-    return ads
-
-def get_anuncio_by_id(ad_id: int, db: Session):
-    ad = db.query(Anuncio).filter(Anuncio.anuncio_id == ad_id).first()
-    if ad is None:
-        raise HTTPException(status_code=404, detail="Advertisement not found")
-    return ad
-
-def update_anuncio(ad_id: int, ad: AdvertisementModel, db: Session = Depends(get_db)):
-    db_ad = db.query(Anuncio).filter(Anuncio.anuncio_id == ad_id).first()
-    if db_ad is None:
-        raise HTTPException(status_code=404, detail="Advertisement not found")
-    
-    update_data = ad.dict(exclude_unset=True)
-    for key, value in update_data.items():
-        if hasattr(db_ad, key) and value is not None:
-            setattr(db_ad, key, value)
-
-    db.commit()
-    db.refresh(db_ad)
-    return db_ad
-
-
-def delete_anuncio_by_id(ad_id: int, db: Session = Depends(get_db)):
-    db_ad = db.query(Anuncio).filter(Anuncio.anuncio_id == ad_id).first()
-    if not db_ad:
-        raise HTTPException(status_code=404, detail="Advertisement not found")
-    
-    db.delete(db_ad)
-    db.commit()
-    return {"message": "Advertisement deleted"}
 
 
 # async def get_current_user(api_token: str = Depends(oauth2_scheme)):
