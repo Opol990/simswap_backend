@@ -55,6 +55,16 @@ class ProductModel(BaseModel):
     # class Config:
     #     orm_mode = True
 
+class UpdateProduct(BaseModel):
+    nombre_producto: Optional[str]
+    marca: Optional[str]
+    modelo: Optional[str]
+    precio: Optional[float]
+    descripcion: Optional[str]
+    localizacion: Optional[str]
+    categoria: Optional[str]  # Usamos el nombre de la categoría para buscar su id
+
+
 class FindProductIDRequest(BaseModel):
     product_id: Optional[int] = Field(None, description="ID del producto")
 
@@ -83,13 +93,12 @@ class Review(BaseModel):
     fecha_valoracion: datetime
 
 class TransactionModel(BaseModel):
-    transaccion_id: Optional[int]
     comprador_id: int
     vendedor_id: int
     producto_id: int
-    fecha_transaccion: datetime
     monto: float
-    stripe_payment_id: str
+    nombre_producto: str
+    stripe_payment_id : Optional[str] = ""
 
 class Shipment(BaseModel):
     envio_id: Optional[int]

@@ -10,3 +10,7 @@ mysql-connector-python
 passlib
 pydantic[email]
 bcrypt
+websockets
+stripe
+email-validator
+smtplib

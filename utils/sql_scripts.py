@@ -159,16 +159,22 @@ def update_product(product_id: int, product: ProductModel, db: Session = Depends
     if db_product is None:
         raise HTTPException(status_code=404, detail="Product not found")
     
+    print("LLega a update_product")
     # Actualización dinámica basada en los campos proporcionados en la solicitud
-    update_data = product.dict(exclude_unset=True)
+    update_data = product.model_dump(exclude_unset=True)
+    print("crear update_data")
     for key, value in update_data.items():
         if hasattr(db_product, key):
             setattr(db_product, key, value)
+            print(f"Atributo {key} cambiado")
 
     # Si 'categoria' es una de las claves y necesita ser convertida a 'categoria_id'
     if 'categoria' in update_data:
         categoria_id = buscar_id_categoria(product.categoria, db)
         db_product.categoria_id = categoria_id
+        print("categoria cambiada")
+
+
 
     db.commit()
     db.refresh(db_product)

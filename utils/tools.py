@@ -1,3 +1,6 @@
+from email.message import EmailMessage
+import os
+import smtplib
 import bcrypt
 from jose import JWTError, jwt 
 from datetime import datetime, timedelta
@@ -18,3 +21,14 @@ def create_access_token(data: dict):
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
+
+def send_email(subject: str, recipient: str, body: str):
+    email_message = EmailMessage()
+    email_message['Subject'] = subject
+    email_message['From'] = os.getenv("EMAIL_SENDER")
+    email_message['To'] = recipient
+    email_message.set_content(body)
+
+    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+        smtp.login(os.getenv("EMAIL_SENDER"), os.getenv("EMAIL_PASSWORD"))
+        smtp.send_message(email_message)

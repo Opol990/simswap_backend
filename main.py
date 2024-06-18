@@ -1,5 +1,7 @@
+import json
 import logging
-from fastapi import FastAPI, Path,HTTPException, Depends,Request,status
+from fastapi import BackgroundTasks, FastAPI, Path,HTTPException, Depends,Request, WebSocket, WebSocketDisconnect,status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 from typing import List,Optional
 from fastapi.security import OAuth2PasswordBearer
@@ -8,10 +10,12 @@ from jose import JWTError, jwt
 from datetime import datetime, timedelta
 
 from sqlalchemy import Transaction
-from utils.models import Message, Review, Shipment, TransactionModel, UserModel, LoginRequest, RegisterUserRequest, FindUserRequest, UpdateUserRequest, ProductModel, ProductQuery
+import stripe
+from utils.connection_manager import ConnectionManager
+from utils.models import Message, Review, Shipment, TransactionModel, UpdateProduct, UserModel, LoginRequest, RegisterUserRequest, FindUserRequest, UpdateUserRequest, ProductModel, ProductQuery
 from utils.sql_scripts import *
 from utils.sql_connection import Base, engine
-from utils.tools import create_access_token
+from utils.tools import create_access_token, send_email
 from dotenv import load_dotenv
 import os
 from sqlalchemy.orm import Session
@@ -39,6 +43,33 @@ app.add_middleware(
 )
 
 bypass_routes = ["/docs", "/openapi.json", "/redoc", "/users/login", "/users/signup", ]
+
+manager = ConnectionManager()
+
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+
+#Websocket
+@app.websocket("/ws/{user_id}")
+async def websocket_endpoint(websocket: WebSocket, user_id: int, db: Session = Depends(get_db)):
+    await manager.connect(websocket, user_id)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            data_json = json.loads(data)
+            message = Mensaje(
+                producto_id=data_json["producto_id"],
+                id_usuario_envia=data_json["id_usuario_envia"],
+                id_usuario_recibe=data_json["id_usuario_recibe"],
+                contenido=data_json["contenido"],
+                fecha_envio=data_json["fecha_envio"],
+                leido=False
+            )
+            db.add(message)
+            db.commit()
+            await manager.send_personal_message(json.dumps(data_json), data_json["id_usuario_recibe"])
+    except WebSocketDisconnect:
+        manager.disconnect(websocket, user_id)
+        await manager.broadcast(f"User {user_id} left the chat")
 
 #Middleware
 @app.middleware("http")
@@ -146,57 +177,200 @@ async def add_product(product: ProductModel, user: Usuario = Depends(get_current
     product = create_product(product, user, db)
     return product  
 
-@app.get("/users/{user_id}/products", response_model=List[ProductModel])
+@app.get("/users/{user_id}/products")
 async def get_user_products(user_id: int, db: Session = Depends(get_db)):
     products = db.query(Producto).filter(Producto.vendedor_id == user_id).all()
     product_list = [
         {
+            "producto_id": product.producto_id,
             "nombre_producto": product.nombre_producto,
             "marca": product.marca,
             "modelo": product.modelo,
             "precio": product.precio,
             "descripcion": product.descripcion,
             "localizacion": product.localizacion,
-            "categoria": product.categoria.nombre
+            "categoria": product.categoria.nombre,
+            "disponibilidad": product.disponibilidad  
         }
         for product in products
     ]
     return product_list
 
+
 @app.get("/allproducts")
 async def list_products(user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
-    products = db.query(Producto).filter(Producto.vendedor_id != user.usuario_id).all()
+    products = db.query(Producto).filter(Producto.vendedor_id != user.usuario_id, Producto.disponibilidad == 'disponible').all()
     return products
 
 @app.get("/products/category/{category_name}")
 async def get_products_by_category(category_name: str, user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
     products = db.query(Producto).join(Categoria).filter(
         Categoria.nombre == category_name,
-        Producto.vendedor_id != user.usuario_id  # Excluir productos del propio usuario
+        Producto.vendedor_id != user.usuario_id,  # Excluir productos del propio usuario
+        Producto.disponibilidad == 'disponible'   # Solo productos disponibles
     ).all()
 
     return products
+
 
 @app.get("/products/{product_id}")
 async def get_product(product_id: int, db: Session = Depends(get_db)):
     return find_product_by_id(product_id, db)
 
-@app.put("/products/{product_id}")
-async def update_product(product_id: int, product: ProductModel, db: Session = Depends(get_db)):
-    return update_product(product_id, product, db) 
+@app.put("/products/{product_id}", response_model=ProductModel)
+async def update_user_product(product_id: int, product: UpdateProduct, db: Session = Depends(get_db)):
+    db_product = db.query(Producto).filter(Producto.producto_id == product_id).first()
+    if not db_product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    # Actualiza los campos del producto
+    for key, value in product.dict().items():
+        if key == "categoria":
+            category = db.query(Categoria).filter(Categoria.nombre == value).first()
+            if not category:
+                raise HTTPException(status_code=404, detail="Category not found")
+            db_product.categoria_id = category.categoria_id
+        else:
+            setattr(db_product, key, value)
+
+    db.commit()
+    db.refresh(db_product)
+    return db_product
+
 
 @app.delete("/products/{product_id}")
 async def delete_product(product_id: int, db: Session = Depends(get_db)):
-    return delete_user_by_id(product_id, db)
+    return delete_product_by_id(product_id, db)
 
 @app.get("/products/search", response_model=List[ProductModel])
 async def search_products_with_filters(query: ProductQuery = Depends(), db: Session = Depends(get_db)):
     return search_products(query, db)
 
+@app.get("/products/vendedor/{producto_id}")
+async def get_vendedor_id_and_disponibilidad(producto_id: int, db: Session = Depends(get_db)):
+    producto = db.query(Producto).filter(Producto.producto_id == producto_id).first()
+    if not producto:
+        raise HTTPException(status_code=404, detail="Producto no encontrado")
+    return {"vendedor_id": producto.vendedor_id, "disponibilidad": producto.disponibilidad}
+
+
+
+
 @app.get("/categories", response_model=List[dict])
 async def get_categories(db: Session = Depends(get_db)):
     categories = db.query(Categoria).all()
     return [{"categoria_id": category.categoria_id, "nombre": category.nombre} for category in categories]
+
+@app.post("/create-checkout-session")
+async def create_checkout_session(data: TransactionModel, db: Session = Depends(get_db)):
+    try:
+        checkout_session = stripe.checkout.Session.create(
+            payment_method_types=['card'],
+            line_items=[{
+                'price_data': {
+                    'currency': 'eur',
+                    'product_data': {
+                        'name': data.nombre_producto,
+                    },
+                    'unit_amount': int(data.monto * 100),
+                },
+                'quantity': 1,
+            }],
+            mode='payment',
+            success_url="http://localhost:3000/checkout-success",
+            cancel_url="http://localhost:3000/cancel",
+        )
+
+        data.stripe_payment_id = checkout_session.id
+
+        return {
+            "url": checkout_session.url,
+            "transaction": data
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/purchase_product")
+async def purchase_product(
+    transaction: TransactionModel, 
+    background_tasks: BackgroundTasks, 
+    db: Session = Depends(get_db)
+):
+    print("_______________________________________")
+    print(transaction.stripe_payment_id)
+    try:
+
+
+        db_product = db.query(Producto).filter(Producto.producto_id == transaction.producto_id).first()
+        if not db_product:
+            raise HTTPException(status_code=404, detail="Producto no encontrado")
+
+        db_product.disponibilidad = 'vendido'
+        db.commit()
+
+        print("Producto actualizado")
+
+        db_transaction = Transaccion(
+            comprador_id=transaction.comprador_id,
+            vendedor_id=transaction.vendedor_id,
+            producto_id=transaction.producto_id,
+            fecha_transaccion=datetime.utcnow(),
+            monto=transaction.monto,
+            stripe_payment_id=transaction.stripe_payment_id
+        )
+        db.add(db_transaction)
+        db.commit()
+        db.refresh(db_transaction)
+
+        comprador = db.query(Usuario).filter(Usuario.usuario_id == transaction.comprador_id).first()
+        vendedor = db.query(Usuario).filter(Usuario.usuario_id == transaction.vendedor_id).first()
+
+        print("Comprador y vendedor encontrados")
+
+        background_tasks.add_task(
+            send_email,
+            "Producto Vendido",
+            vendedor.email,
+            f"Tu producto {db_product.nombre_producto} ha sido vendido."
+        )
+
+        background_tasks.add_task(
+            send_email,
+            "Compra Exitosa",
+            comprador.email,
+            f"Has comprado el producto {db_product.nombre_producto}."
+        )
+
+
+        # Enviar el mensaje a todos los usuarios que tienen un chat sobre el producto
+        chats = db.query(Mensaje).filter(Mensaje.producto_id == transaction.producto_id).all()
+        user_ids = set()
+        for chat in chats:
+            if chat.id_usuario_envia != transaction.comprador_id:
+                user_ids.add(chat.id_usuario_envia)
+            if chat.id_usuario_recibe != transaction.comprador_id:
+                user_ids.add(chat.id_usuario_recibe)
+
+        for user_id in user_ids:
+            mensaje = Mensaje(
+                producto_id=transaction.producto_id,
+                id_usuario_envia=transaction.comprador_id,
+                id_usuario_recibe=user_id,
+                contenido='El producto ha sido comprado y ya no está disponible.',
+                fecha_envio=datetime.utcnow(),
+                leido=False
+            )
+            db.add(mensaje)
+            db.commit()
+
+        print("Chats Actualizados")
+
+        return db_transaction
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 
 
 # Messages
@@ -240,16 +414,14 @@ async def list_chat_messages(product_id: int, user1_id: int, user2_id: int, db: 
     return messages
 
 
-@app.get("/messages/user/{user_id}", response_model=List[Message])
+@app.get("/messages/user/{user_id}")
 async def list_user_messages(user_id: int, db: Session = Depends(get_db)):
     messages = db.query(Mensaje).filter(
         (Mensaje.id_usuario_envia == user_id) | (Mensaje.id_usuario_recibe == user_id)
     ).all()
+    if not messages:
+        raise HTTPException(status_code=404, detail="No messages found for this user")
     return messages
-
-
-
-
 
 @app.get("/users/{user_id}/chats")
 async def get_user_chats(user_id: int, db: Session = Depends(get_db)):
@@ -257,6 +429,21 @@ async def get_user_chats(user_id: int, db: Session = Depends(get_db)):
         (Mensaje.id_usuario_envia == user_id) | (Mensaje.id_usuario_recibe == user_id)
     ).all()
     return chats
+
+@app.put("/messages/mark-as-read/{product_id}/{user1_id}/{user2_id}")
+async def mark_messages_as_read(product_id: int, user1_id: int, user2_id: int, db: Session = Depends(get_db)):
+    messages = db.query(Mensaje).filter(
+        Mensaje.producto_id == product_id,
+        Mensaje.id_usuario_envia == user2_id,
+        Mensaje.id_usuario_recibe == user1_id,
+        Mensaje.leido == False
+    ).all()
+    
+    for message in messages:
+        message.leido = True
+    
+    db.commit()
+    return {"message": "Messages marked as read"}
 
 
 # Reviews
@@ -278,22 +465,6 @@ async def leave_review(review: Review, db: Session = Depends(get_db)):
 async def get_reviews(user_id: int, db: Session = Depends(get_db)):
     reviews = db.query(Valoracion).filter(Valoracion.para_usuario_id == user_id).all()
     return reviews
-
-# Transactions
-@app.post("/transactions/")
-async def create_transaction(transaction: TransactionModel, db: Session = Depends(get_db)):
-    db_transaction = Transaccion(
-        comprador_id=transaction.comprador_id,
-        vendedor_id=transaction.vendedor_id,
-        producto_id=transaction.producto_id,
-        fecha_transaccion=transaction.fecha_transaccion,
-        monto=transaction.monto,
-        stripe_payment_id=transaction.stripe_payment_id
-    )
-    db.add(db_transaction)
-    db.commit()
-    db.refresh(db_transaction)
-    return db_transaction
 
 @app.get("/transactions/", response_model=List[TransactionModel])
 async def list_transactions(db: Session = Depends(get_db)):

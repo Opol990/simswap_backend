@@ -28,7 +28,7 @@ class Producto(Base):
     categoria = relationship("Categoria", back_populates="productos")
     vendedor = relationship("Usuario", back_populates="productos")
     fotos = relationship("Foto", back_populates="producto")
-    mensajes = relationship("Mensaje", back_populates="producto")
+    mensajes = relationship("Mensaje", back_populates="producto", cascade="all, delete-orphan")
 
     # Indexes
     __table_args__ = (Index('ix_productos_categoria_id', 'categoria_id'),
