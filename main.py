@@ -1,21 +1,14 @@
-import json
-import logging
-from fastapi import BackgroundTasks, FastAPI, Path,HTTPException, Depends,Request, WebSocket, WebSocketDisconnect,status
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ValidationError
-from typing import List,Optional
-from fastapi.security import OAuth2PasswordBearer
+
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Depends,Request
+from typing import List
 from fastapi.middleware.cors import CORSMiddleware
 from jose import JWTError, jwt 
 from datetime import datetime, timedelta
-
-from sqlalchemy import Transaction
 import stripe
-from utils.connection_manager import ConnectionManager
-from utils.models import Message, Review, Shipment, TransactionModel, UpdateProduct, UserModel, LoginRequest, RegisterUserRequest, FindUserRequest, UpdateUserRequest, ProductModel, ProductQuery
+from utils.models import Message,  TransactionModel, UpdateProduct, LoginRequest, RegisterUserRequest,  UpdateUserRequest, ProductModel
 from utils.sql_scripts import *
 from utils.sql_connection import Base, engine
-from utils.tools import create_access_token, send_email
+from utils.tools import  send_email
 from dotenv import load_dotenv
 import os
 from sqlalchemy.orm import Session
@@ -38,38 +31,15 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=origins,
+    allow_headers=origins,
 )
 
 bypass_routes = ["/docs", "/openapi.json", "/redoc", "/users/login", "/users/signup", ]
 
-manager = ConnectionManager()
 
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 
-#Websocket
-@app.websocket("/ws/{user_id}")
-async def websocket_endpoint(websocket: WebSocket, user_id: int, db: Session = Depends(get_db)):
-    await manager.connect(websocket, user_id)
-    try:
-        while True:
-            data = await websocket.receive_text()
-            data_json = json.loads(data)
-            message = Mensaje(
-                producto_id=data_json["producto_id"],
-                id_usuario_envia=data_json["id_usuario_envia"],
-                id_usuario_recibe=data_json["id_usuario_recibe"],
-                contenido=data_json["contenido"],
-                fecha_envio=data_json["fecha_envio"],
-                leido=False
-            )
-            db.add(message)
-            db.commit()
-            await manager.send_personal_message(json.dumps(data_json), data_json["id_usuario_recibe"])
-    except WebSocketDisconnect:
-        manager.disconnect(websocket, user_id)
-        await manager.broadcast(f"User {user_id} left the chat")
 
 #Middleware
 @app.middleware("http")
@@ -125,6 +95,9 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> Usuario
 
 
 # # Users
+
+
+
 @app.post("/users/signup")
 async def register_user(user: RegisterUserRequest,  db: Session = Depends(get_db)):
     user_info = register_new_user(user_request=user, db=db)
@@ -147,28 +120,22 @@ async def find_user_by_id(user: Usuario = Depends(get_current_user), db: Session
         return get_user_by_id(user.usuario_id, db)
 
 @app.put("/users/me")
-async def update_user_info(user_data: UpdateUserRequest, user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
-    db_user = db.query(Usuario).filter(Usuario.usuario_id == user.usuario_id).first()
-    if not db_user:
+async def update_user_endpoint(user_data: UpdateUserRequest, user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    updated_user = update_user_info(user.usuario_id, user_data, db)
+    return updated_user
+
+# @app.delete("/users/{user_id}")
+# async def delete_user_by_id(user_id:int, db: Session = Depends(get_db)):
+#     message_deleted = delete_user(user_id, db)
+#     return {"message_deleted": message_deleted}
+
+
+@app.get("/users/{user_id}")
+async def find_user_by_id(user_id: int, db: Session = Depends(get_db)):
+    user = db.query(Usuario).filter(Usuario.usuario_id == user_id).first()
+    if user is None:
         raise HTTPException(status_code=404, detail="User not found")
-
-    db_user.username = user_data.username or db_user.username
-    db_user.nombre = user_data.nombre or db_user.nombre
-    db_user.apellido1 = user_data.apellido1 or db_user.apellido1
-    db_user.apellido2 = user_data.apellido2 or db_user.apellido2
-    db_user.email = user_data.email or db_user.email
-    db_user.fecha_registro = user_data.fecha_registro or db_user.fecha_registro
-    db_user.ubicacion = user_data.ubicacion or db_user.ubicacion
-
-    db.commit()
-    db.refresh(db_user)
-    return db_user
-
-@app.delete("/users/{user_id}")
-async def delete_user_by_id(user_id:int, db: Session = Depends(get_db)):
-    message_deleted = delete_user(user_id, db)
-    return {"message_deleted": message_deleted}
-
+    return user
 
 
 # Products
@@ -177,24 +144,9 @@ async def add_product(product: ProductModel, user: Usuario = Depends(get_current
     product = create_product(product, user, db)
     return product  
 
-@app.get("/users/{user_id}/products")
-async def get_user_products(user_id: int, db: Session = Depends(get_db)):
-    products = db.query(Producto).filter(Producto.vendedor_id == user_id).all()
-    product_list = [
-        {
-            "producto_id": product.producto_id,
-            "nombre_producto": product.nombre_producto,
-            "marca": product.marca,
-            "modelo": product.modelo,
-            "precio": product.precio,
-            "descripcion": product.descripcion,
-            "localizacion": product.localizacion,
-            "categoria": product.categoria.nombre,
-            "disponibilidad": product.disponibilidad  
-        }
-        for product in products
-    ]
-    return product_list
+@app.get("/users/{user_id}/products", response_model=List[ProductResponse])
+async def get_user_products_endpoint(user_id: int, db: Session = Depends(get_db)):
+    return get_user_products(user_id, db)
 
 
 @app.get("/allproducts")
@@ -203,14 +155,8 @@ async def list_products(user: Usuario = Depends(get_current_user), db: Session =
     return products
 
 @app.get("/products/category/{category_name}")
-async def get_products_by_category(category_name: str, user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
-    products = db.query(Producto).join(Categoria).filter(
-        Categoria.nombre == category_name,
-        Producto.vendedor_id != user.usuario_id,  # Excluir productos del propio usuario
-        Producto.disponibilidad == 'disponible'   # Solo productos disponibles
-    ).all()
-
-    return products
+async def get_products_by_category_endpoint(category_name: str, user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    return get_products_by_category(category_name, user.usuario_id, db)
 
 
 @app.get("/products/{product_id}")
@@ -218,33 +164,18 @@ async def get_product(product_id: int, db: Session = Depends(get_db)):
     return find_product_by_id(product_id, db)
 
 @app.put("/products/{product_id}", response_model=ProductModel)
-async def update_user_product(product_id: int, product: UpdateProduct, db: Session = Depends(get_db)):
-    db_product = db.query(Producto).filter(Producto.producto_id == product_id).first()
-    if not db_product:
-        raise HTTPException(status_code=404, detail="Product not found")
-
-    # Actualiza los campos del producto
-    for key, value in product.dict().items():
-        if key == "categoria":
-            category = db.query(Categoria).filter(Categoria.nombre == value).first()
-            if not category:
-                raise HTTPException(status_code=404, detail="Category not found")
-            db_product.categoria_id = category.categoria_id
-        else:
-            setattr(db_product, key, value)
-
-    db.commit()
-    db.refresh(db_product)
-    return db_product
+@app.put("/products/{product_id}", response_model=ProductModel)
+async def update_user_product_endpoint(product_id: int, product: UpdateProduct, db: Session = Depends(get_db)):
+    return update_product(product_id, product, db)
 
 
 @app.delete("/products/{product_id}")
 async def delete_product(product_id: int, db: Session = Depends(get_db)):
     return delete_product_by_id(product_id, db)
 
-@app.get("/products/search", response_model=List[ProductModel])
-async def search_products_with_filters(query: ProductQuery = Depends(), db: Session = Depends(get_db)):
-    return search_products(query, db)
+# @app.get("/products/search", response_model=List[ProductModel])
+# async def search_products_with_filters(query: ProductQuery = Depends(), db: Session = Depends(get_db)):
+#     return search_products(query, db)
 
 @app.get("/products/vendedor/{producto_id}")
 async def get_vendedor_id_and_disponibilidad(producto_id: int, db: Session = Depends(get_db)):
@@ -296,11 +227,8 @@ async def purchase_product(
     background_tasks: BackgroundTasks, 
     db: Session = Depends(get_db)
 ):
-    print("_______________________________________")
-    print(transaction.stripe_payment_id)
+
     try:
-
-
         db_product = db.query(Producto).filter(Producto.producto_id == transaction.producto_id).first()
         if not db_product:
             raise HTTPException(status_code=404, detail="Producto no encontrado")
@@ -376,96 +304,45 @@ async def purchase_product(
 # Messages
 @app.post("/messages/", response_model=Message)
 async def send_message(message: Message, db: Session = Depends(get_db)):
-    db_message = Mensaje(
-        producto_id=message.producto_id,
-        id_usuario_envia=message.id_usuario_envia,
-        id_usuario_recibe=message.id_usuario_recibe,
-        contenido=message.contenido,
-        fecha_envio=message.fecha_envio,
-        leido=message.leido
-    )
-    db.add(db_message)
-    db.commit()
-    db.refresh(db_message)
-    return db_message
+    return create_message(message, db)
 
-@app.get("/messages/received/{user_id}", response_model=List[Message])
-async def list_received_messages(user_id: int, db: Session = Depends(get_db)):
-    messages = db.query(Mensaje).filter(Mensaje.id_usuario_recibe == user_id).all()
-    return messages
+# @app.get("/messages/received/{user_id}", response_model=List[Message])
+# async def list_received_messages(user_id: int, db: Session = Depends(get_db)):
+#     messages = db.query(Mensaje).filter(Mensaje.id_usuario_recibe == user_id).all()
+#     return messages
 
-@app.get("/messages/sent/{user_id}", response_model=List[Message])
-async def list_sent_messages(user_id: int, db: Session = Depends(get_db)):
-    messages = db.query(Mensaje).filter(Mensaje.id_usuario_envia == user_id).all()
-    return messages
+# @app.get("/messages/sent/{user_id}", response_model=List[Message])
+# async def list_sent_messages(user_id: int, db: Session = Depends(get_db)):
+#     messages = db.query(Mensaje).filter(Mensaje.id_usuario_envia == user_id).all()
+#     return messages
 
-@app.get("/messages/product/{product_id}", response_model=List[Message])
-async def list_messages_by_product(product_id: int, db: Session = Depends(get_db)):
-    messages = db.query(Mensaje).filter(Mensaje.producto_id == product_id).all()
-    return messages
+# @app.get("/messages/product/{product_id}", response_model=List[Message])
+# async def list_messages_by_product(product_id: int, db: Session = Depends(get_db)):
+#     messages = db.query(Mensaje).filter(Mensaje.producto_id == product_id).all()
+#     return messages
 
 @app.get("/messages/chat/{product_id}/{user1_id}/{user2_id}", response_model=List[Message])
 async def list_chat_messages(product_id: int, user1_id: int, user2_id: int, db: Session = Depends(get_db)):
-    messages = db.query(Mensaje).filter(
-        Mensaje.producto_id == product_id,
-        ((Mensaje.id_usuario_envia == user1_id) & (Mensaje.id_usuario_recibe == user2_id)) |
-        ((Mensaje.id_usuario_envia == user2_id) & (Mensaje.id_usuario_recibe == user1_id))
-    ).all()
-    return messages
+    return get_chat_messages(product_id, user1_id, user2_id, db)
 
 
 @app.get("/messages/user/{user_id}")
 async def list_user_messages(user_id: int, db: Session = Depends(get_db)):
-    messages = db.query(Mensaje).filter(
-        (Mensaje.id_usuario_envia == user_id) | (Mensaje.id_usuario_recibe == user_id)
-    ).all()
-    if not messages:
-        raise HTTPException(status_code=404, detail="No messages found for this user")
-    return messages
+    return get_user_messages(user_id, db)
 
-@app.get("/users/{user_id}/chats")
-async def get_user_chats(user_id: int, db: Session = Depends(get_db)):
-    chats = db.query(Mensaje).options(joinedload(Mensaje.producto)).filter(
-        (Mensaje.id_usuario_envia == user_id) | (Mensaje.id_usuario_recibe == user_id)
-    ).all()
-    return chats
+# @app.get("/users/{user_id}/chats")
+# async def get_user_chats(user_id: int, db: Session = Depends(get_db)):
+#     chats = db.query(Mensaje).options(joinedload(Mensaje.producto)).filter(
+#         (Mensaje.id_usuario_envia == user_id) | (Mensaje.id_usuario_recibe == user_id)
+#     ).all()
+#     return chats
 
 @app.put("/messages/mark-as-read/{product_id}/{user1_id}/{user2_id}")
 async def mark_messages_as_read(product_id: int, user1_id: int, user2_id: int, db: Session = Depends(get_db)):
-    messages = db.query(Mensaje).filter(
-        Mensaje.producto_id == product_id,
-        Mensaje.id_usuario_envia == user2_id,
-        Mensaje.id_usuario_recibe == user1_id,
-        Mensaje.leido == False
-    ).all()
-    
-    for message in messages:
-        message.leido = True
-    
-    db.commit()
+    mark_messages_read(product_id, user1_id, user2_id, db)
     return {"message": "Messages marked as read"}
 
-
-# Reviews
-@app.post("/reviews/", response_model=Review)
-async def leave_review(review: Review, db: Session = Depends(get_db)):
-    db_review = Valoracion(
-        de_usuario_id=review.de_usuario_id,
-        para_usuario_id=review.para_usuario_id,
-        puntuacion=review.puntuacion,
-        comentario=review.comentario,
-        fecha_valoracion=review.fecha_valoracion
-    )
-    db.add(db_review)
-    db.commit()
-    db.refresh(db_review)
-    return db_review
-
-@app.get("/reviews/{user_id}", response_model=List[Review])
-async def get_reviews(user_id: int, db: Session = Depends(get_db)):
-    reviews = db.query(Valoracion).filter(Valoracion.para_usuario_id == user_id).all()
-    return reviews
-
+# Transactions
 @app.get("/transactions/", response_model=List[TransactionModel])
 async def list_transactions(db: Session = Depends(get_db)):
     transactions = db.query(Transaccion).all()
@@ -478,36 +355,7 @@ async def get_transaction(transaction_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Transaction not found")
     return transaction
 
-# Shipments
-@app.post("/shipments/", response_model=Shipment)
-async def register_shipment(shipment: Shipment, db: Session = Depends(get_db)):
-    db_shipment = Envio(
-        transaccion_id=shipment.transaccion_id,
-        estado_envio=shipment.estado_envio,
-        fecha_envio=shipment.fecha_envio
-    )
-    db.add(db_shipment)
-    db.commit()
-    db.refresh(db_shipment)
-    return db_shipment
 
-@app.put("/shipments/{shipment_id}", response_model=Shipment)
-async def update_shipment_status(shipment_id: int, shipment: Shipment, db: Session = Depends(get_db)):
-    db_shipment = db.query(Envio).filter(Envio.envio_id == shipment_id).first()
-    if db_shipment is None:
-        raise HTTPException(status_code=404, detail="Shipment not found")
-    db_shipment.estado_envio = shipment.estado_envio
-    db_shipment.fecha_envio = shipment.fecha_envio
-    db.commit()
-    db.refresh(db_shipment)
-    return db_shipment
-
-@app.get("/shipments/{shipment_id}", response_model=Shipment)
-async def get_shipment_details(shipment_id: int, db: Session = Depends(get_db)):
-    shipment = db.query(Envio).filter(Envio.envio_id == shipment_id).first()
-    if shipment is None:
-        raise HTTPException(status_code=404, detail="Shipment not found")
-    return shipment
 
 # Start the Uvicorn server to run the app
 if __name__ == "__main__":

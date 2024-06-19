@@ -2,14 +2,14 @@ from email.message import EmailMessage
 import os
 import smtplib
 import bcrypt
-from jose import JWTError, jwt 
+from jose import jwt 
 from datetime import datetime, timedelta
 
 
 
 SECRET_KEY = "claveSecreta"
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = 180
 
     
 def create_access_token(data: dict):
