@@ -96,8 +96,6 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> Usuario
 
 # # Users
 
-
-
 @app.post("/users/signup")
 async def register_user(user: RegisterUserRequest,  db: Session = Depends(get_db)):
     user_info = register_new_user(user_request=user, db=db)
@@ -306,20 +304,6 @@ async def purchase_product(
 async def send_message(message: Message, db: Session = Depends(get_db)):
     return create_message(message, db)
 
-# @app.get("/messages/received/{user_id}", response_model=List[Message])
-# async def list_received_messages(user_id: int, db: Session = Depends(get_db)):
-#     messages = db.query(Mensaje).filter(Mensaje.id_usuario_recibe == user_id).all()
-#     return messages
-
-# @app.get("/messages/sent/{user_id}", response_model=List[Message])
-# async def list_sent_messages(user_id: int, db: Session = Depends(get_db)):
-#     messages = db.query(Mensaje).filter(Mensaje.id_usuario_envia == user_id).all()
-#     return messages
-
-# @app.get("/messages/product/{product_id}", response_model=List[Message])
-# async def list_messages_by_product(product_id: int, db: Session = Depends(get_db)):
-#     messages = db.query(Mensaje).filter(Mensaje.producto_id == product_id).all()
-#     return messages
 
 @app.get("/messages/chat/{product_id}/{user1_id}/{user2_id}", response_model=List[Message])
 async def list_chat_messages(product_id: int, user1_id: int, user2_id: int, db: Session = Depends(get_db)):
@@ -330,12 +314,6 @@ async def list_chat_messages(product_id: int, user1_id: int, user2_id: int, db: 
 async def list_user_messages(user_id: int, db: Session = Depends(get_db)):
     return get_user_messages(user_id, db)
 
-# @app.get("/users/{user_id}/chats")
-# async def get_user_chats(user_id: int, db: Session = Depends(get_db)):
-#     chats = db.query(Mensaje).options(joinedload(Mensaje.producto)).filter(
-#         (Mensaje.id_usuario_envia == user_id) | (Mensaje.id_usuario_recibe == user_id)
-#     ).all()
-#     return chats
 
 @app.put("/messages/mark-as-read/{product_id}/{user1_id}/{user2_id}")
 async def mark_messages_as_read(product_id: int, user1_id: int, user2_id: int, db: Session = Depends(get_db)):
